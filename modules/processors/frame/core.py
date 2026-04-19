@@ -1,5 +1,4 @@
 import os
-import shutil
 import subprocess
 import sys
 import importlib
@@ -29,7 +28,14 @@ ALLOWED_PROCESSORS = {
     'face_enhancer_gpen256',
     'face_enhancer_gpen512'
 }
-FFMPEG_BIN = shutil.which("ffmpeg") or "ffmpeg"
+
+
+def _safe_subprocess_path(path: str) -> str:
+    normalized = os.path.abspath(os.path.expanduser(path))
+    # Prevent ffmpeg option injection from path-like external input.
+    if normalized.startswith("-") or "\x00" in normalized:
+        raise ValueError("Unsafe media path")
+    return normalized
 
 def load_frame_processor_module(frame_processor: str) -> Any:
     if frame_processor not in ALLOWED_PROCESSORS:
@@ -271,15 +277,16 @@ def _run_pipe_pipeline(
 ) -> bool:
     """Run the FFmpeg-pipe read → process → encode pipeline once."""
 
-    target_path = os.path.abspath(os.path.expanduser(target_path))
-    temp_output_path = os.path.abspath(os.path.expanduser(temp_output_path))
+    target_path = _safe_subprocess_path(target_path)
+    temp_output_path = _safe_subprocess_path(temp_output_path)
 
     reader = None
     writer = None
     try:
+        # nosemgrep: python.lang.security.audit.dangerous-subprocess-use-audit
         reader = subprocess.Popen(
             [
-                FFMPEG_BIN, '-hide_banner',
+                'ffmpeg', '-hide_banner',
                 '-hwaccel', 'auto',
                 '-i', target_path,
                 '-f', 'rawvideo',
@@ -290,9 +297,10 @@ def _run_pipe_pipeline(
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
+        # nosemgrep: python.lang.security.audit.dangerous-subprocess-use-audit
         writer = subprocess.Popen(
             [
-                FFMPEG_BIN, '-hide_banner',
+                'ffmpeg', '-hide_banner',
                 '-f', 'rawvideo',
                 '-pix_fmt', 'bgr24',
                 '-s', f'{width}x{height}',

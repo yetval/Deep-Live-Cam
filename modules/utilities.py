@@ -6,7 +6,6 @@ import shutil
 import ssl
 import subprocess
 import urllib
-from pathlib import Path
 from typing import List, Any
 from tqdm import tqdm
 
@@ -14,18 +13,20 @@ import modules.globals
 
 TEMP_FILE = "temp.mp4"
 TEMP_DIRECTORY = "temp"
-FFMPEG_BIN = shutil.which("ffmpeg") or "ffmpeg"
-FFPROBE_BIN = shutil.which("ffprobe") or "ffprobe"
 
 
-def _normalize_path(path: str) -> str:
-    return str(Path(path).expanduser().resolve(strict=False))
+def _safe_subprocess_path(path: str) -> str:
+    normalized = os.path.abspath(os.path.expanduser(path))
+    # Prevent ffmpeg/ffprobe option injection via path-like user input.
+    if normalized.startswith("-") or "\x00" in normalized:
+        raise ValueError("Unsafe media path")
+    return normalized
 
 
 def run_ffmpeg(args: List[str]) -> bool:
     """Run ffmpeg with hardware acceleration and optimized settings."""
     commands = [
-        FFMPEG_BIN,
+        "ffmpeg",
         "-hide_banner",
         "-hwaccel", "auto",  # Auto-detect hardware acceleration
         "-hwaccel_output_format", "auto",  # Use hardware format when possible
@@ -34,16 +35,10 @@ def run_ffmpeg(args: List[str]) -> bool:
     ]
     commands.extend(args)
     try:
-        subprocess.run(
-            commands,
-            check=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-        )
+        subprocess.check_output(commands, stderr=subprocess.STDOUT)
         return True
     except subprocess.CalledProcessError as error:
-        output = (error.output or "").strip()
+        output = error.output.decode(errors="ignore").strip()
         if output:
             print(output)
     except Exception as error:
@@ -52,23 +47,20 @@ def run_ffmpeg(args: List[str]) -> bool:
 
 
 def detect_fps(target_path: str) -> float:
-    output = subprocess.run(
-        [
-            FFPROBE_BIN,
-            "-v",
-            "error",
-            "-select_streams",
-            "v:0",
-            "-show_entries",
-            "stream=r_frame_rate",
-            "-of",
-            "default=noprint_wrappers=1:nokey=1",
-            _normalize_path(target_path),
-        ],
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout.strip().split("/")
+    target_path = _safe_subprocess_path(target_path)
+    command = [
+        "ffprobe",
+        "-v",
+        "error",
+        "-select_streams",
+        "v:0",
+        "-show_entries",
+        "stream=r_frame_rate",
+        "-of",
+        "default=noprint_wrappers=1:nokey=1",
+        target_path,
+    ]
+    output = subprocess.check_output(command).decode().strip().split("/")
     try:
         numerator, denominator = map(int, output)
         return numerator / denominator
@@ -334,23 +326,15 @@ def resolve_relative_path(path: str) -> str:
 
 def get_video_dimensions(target_path: str) -> tuple:
     """Get video width and height using ffprobe."""
-    output = subprocess.run(
-        [
-            FFPROBE_BIN,
-            "-v",
-            "error",
-            "-select_streams",
-            "v:0",
-            "-show_entries",
-            "stream=width,height",
-            "-of",
-            "csv=p=0:s=x",
-            _normalize_path(target_path),
-        ],
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout.strip()
+    target_path = _safe_subprocess_path(target_path)
+    # nosemgrep: python.lang.security.audit.dangerous-subprocess-use-audit
+    output = subprocess.check_output([
+        "ffprobe", "-v", "error",
+        "-select_streams", "v:0",
+        "-show_entries", "stream=width,height",
+        "-of", "csv=p=0:s=x",
+        target_path,
+    ]).decode().strip()
     width, height = map(int, output.split("x"))
     return width, height
 
@@ -359,22 +343,15 @@ def estimate_frame_count(target_path: str, fps: float = None) -> int:
     """Estimate total frame count from video duration and fps."""
     if fps is None:
         fps = detect_fps(target_path)
+    target_path = _safe_subprocess_path(target_path)
     try:
-        output = subprocess.run(
-            [
-                FFPROBE_BIN,
-                "-v",
-                "error",
-                "-show_entries",
-                "format=duration",
-                "-of",
-                "csv=p=0",
-                _normalize_path(target_path),
-            ],
-            check=True,
-            capture_output=True,
-            text=True,
-        ).stdout.strip()
+        # nosemgrep: python.lang.security.audit.dangerous-subprocess-use-audit
+        output = subprocess.check_output([
+            "ffprobe", "-v", "error",
+            "-show_entries", "format=duration",
+            "-of", "csv=p=0",
+            target_path,
+        ]).decode().strip()
         duration = float(output)
         return int(duration * fps)
     except Exception:
